@@ -1,0 +1,630 @@
+The entire process begins with the src/ingest.py module.
+
+Module: src/ingest.py
+
+Purpose of this module: This module is the starting point of our data pipeline. Its sole responsibility is to find PDF files in a specific folder, extract all the text from them, and then break that text into small, manageable pieces called "chunks." This is the "I" (Ingestion) in RAG.
+
+Let's look at the first function in this module.
+
+Function 1: extract_text_from_pdf()
+
+This is the most fundamental function. It deals with a single PDF file.
+
+function
+def extract_text_from_pdf(pdf_path):
+    """Extracts text from a single PDF file, keeping track of page numbers."""
+    text_by_page = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for i, page in enumerate(pdf.pages):
+            text = page.extract_text()
+            if text:
+                # Basic cleaning: replace newlines and multiple spaces
+                cleaned_text = ' '.join(text.replace('\n', ' ').split())
+                text_by_page.append({"page": i + 1, "text": cleaned_text})
+    return text_by_page
+
+What does it do?
+
+It takes one argument: the file path to a PDF (pdf_path).
+
+It uses the pdfplumber library to open the PDF file.
+
+It loops through every page of the PDF.
+
+For each page, it extracts all the text using page.extract_text().
+
+It performs a basic cleanup on the extracted text: it replaces newline characters (\n) with spaces and squeezes multiple spaces down to a single space. This makes the text a continuous block, which is better for processing later.
+
+It stores the cleaned text along with its page number in a dictionary (e.g., {"page": 1, "text": "..."}).
+
+Finally, it returns a list of these dictionaries, with one dictionary for each page that contained text.
+
+Sample Input & Output
+
+Sample Input (the pdf_path argument):
+
+"./data/Product_Spec_SensorX.pdf"
+
+Sample Output (the returned text_by_page list):
+
+
+[
+  {
+    "page": 1,
+    "text": "Temperature Sensor X100 - Technical Datasheet Model X100 is a high-precision industrial temperature sensor designed for environments up to 1200°C. Specifications: Operating range -200°C to 1200°C, Accuracy ±0.5°C, Response time 0.3s."
+  },
+  {
+    "page": 2,
+    "text": "Installation Guide: Ensure the sensor is mounted securely. Use the provided thermal paste for optimal heat transfer. Do not exceed the maximum torque specifications."
+  }
+]
+
+
+
+*****************************************************************************************************************
+function chunk_text, which takes this output and processes it further
+
+This function, `chunk_text`, takes the text we just extracted from each page and breaks it down into even smaller pieces.
+
+Why do we need this function?
+ A whole page of text can contain many different ideas. If we want to find a very specific answer, it's better to work with smaller, more focused paragraphs or "chunks."
+ This function acts like a pair of scissors, cutting the long page text into these smaller, overlapping pieces.
+
+
+def chunk_text(doc_id, text_by_page, chunk_size=500, overlap=50):
+    """Chunks text from a document page by page."""
+    chunks = []
+    chunk_id_counter = 0
+    for page_data in text_by_page:
+        text = page_data["text"]
+        page_num = page_data["page"]
+        words = text.split()
+        # The core logic: a sliding window over the words
+        for i in range(0, len(words), chunk_size - overlap):
+            chunk_text = " ".join(words[i:i + chunk_size])
+            chunks.append({
+                "doc_id": doc_id,
+                "page": page_num,
+                "chunk_id": chunk_id_counter,
+                "text": chunk_text
+            })
+            chunk_id_counter += 1
+    return chunks
+
+
+What does it do?
+1.  It takes the `doc_id` (the filename), the `text_by_page` list from our previous function, a `chunk_size` (how many words per chunk), and an `overlap` (how many words to share between consecutive chunks).
+2.  It loops through each page's text that we extracted.
+3.  It splits the text of a page into a list of individual words.
+4.  The main logic is a `for` loop that creates a "sliding window" across the list of words.
+    *   The first chunk takes words from index 0 to `chunk_size`.
+    *   The second chunk starts `overlap` words *before* the first one ended. For example, if `chunk_size` is 100 and `overlap` is 20, the first chunk is words 0-100, and the second chunk is words 80-180.
+    *   **Why overlap?** This is important. It prevents a key sentence or idea from being split awkwardly right at the boundary between two chunks, increasing the chance of finding relevant information.
+5.  For each chunk of text it creates, it stores it in a dictionary with rich metadata: which document it came from (`doc_id`), the `page` number, a unique ID for that specific chunk (`chunk_id`), and the `text` of the chunk itself.
+6.  It returns a single, flat list of all these chunk dictionaries for the entire document.
+
+#### Sample Input & Output
+
+Sample Input:
+    *   `doc_id`: `"Product_Spec_SensorX.pdf"`
+    *   `text_by_page`: The output from our previous function.
+        [
+          {
+            "page": 1,
+            "text": "Temperature Sensor X100 - Technical Datasheet Model X100 is a high-precision industrial temperature sensor designed for environments up to 1200°C. Specifications: Operating range -200°C to 1200°C, Accuracy ±0.5°C, Response time 0.3s."
+          }
+        ]
+
+    *   `chunk_size`: `20` (using a small number for a clear example)
+    *   `overlap`: `5`
+
+Sample Output (the returned `chunks` list):
+    [
+      {
+        "doc_id": "Product_Spec_SensorX.pdf",
+        "page": 1,
+        "chunk_id": 0,
+        "text": "Temperature Sensor X100 - Technical Datasheet Model X100 is a high-precision industrial temperature sensor designed for environments up to 1200°C."
+      },
+      {
+        "doc_id": "Product_Spec_SensorX.pdf",
+        "page": 1,
+        "chunk_id": 1,
+        "text": "designed for environments up to 1200°C. Specifications: Operating range -200°C to 1200°C, Accuracy ±0.5°C, Response time 0.3s."
+      }
+    ]
+
+Notice how the phrase "designed for environments up to 1200°C." is present in both chunks. That's the overlap in action!)*
+
+*********************************************************************************************************************************************************
+
+Let's look at the final function in the src/ingest.py module.
+
+This function is the "manager" of the ingestion process. It takes a directory path, finds all the PDFs inside, and uses the two functions we just discussed to process all of them.
+
+process_pdfs_from_directory()
+
+def process_pdfs_from_directory(directory_path):
+    """Processes all PDFs in a directory to extract and chunk text."""
+    all_chunks = []
+    pdf_files = list(Path(directory_path).glob("*.pdf"))
+    
+    if not pdf_files:
+        print(f"No PDF files found in directory: {directory_path}")
+        return []
+
+    print(f"Found {len(pdf_files)} PDF(s) to process...")
+    for pdf_path in tqdm(pdf_files, desc="Processing PDFs"):
+        doc_id = pdf_path.name
+        # Step 1: Use the first function
+        text_by_page = extract_text_from_pdf(pdf_path)
+        # Step 2: Use the second function
+        doc_chunks = chunk_text(doc_id, text_by_page)
+        # Step 3: Collect all chunks from all files
+        all_chunks.extend(doc_chunks)
+        
+    return all_chunks
+
+What does it do?
+
+It takes one argument: the path to a folder (directory_path), which is our ./data folder.
+
+It uses the pathlib library to scan that folder and find all files that end with the .pdf extension.
+
+It then iterates through each PDF file it found.
+
+Inside the loop, for each PDF, it performs the two-step process we've already covered:
+
+It calls extract_text_from_pdf() to get the text from every page.
+
+It passes that result to chunk_text() to get a list of all the text chunks for that single document.
+
+It collects the chunks from every PDF into one giant list called all_chunks.
+
+After processing all the PDFs, it returns this final, comprehensive list of every chunk from every document. This list is the master dataset that the rest of our application will work with.
+
+Sample Input & Output
+
+Sample Input (the directory_path argument):
+
+"./data"
+
+(Assuming the ./data folder contains doc1.pdf and doc2.pdf)
+
+Sample Output (the returned all_chunks list):
+This will be a long list containing the chunk dictionaries from all the PDFs.
+
+[
+  // Chunks from doc1.pdf
+  {
+    "doc_id": "doc1.pdf",
+    "page": 1,
+    "chunk_id": 0,
+    "text": "This is the first chunk from the first page of document one..."
+  },
+  {
+    "doc_id": "doc1.pdf",
+    "page": 1,
+    "chunk_id": 1,
+    "text": "This is the second chunk from the first page of document one..."
+  },
+  {
+    "doc_id": "doc1.pdf",
+    "page": 2,
+    "chunk_id": 2,
+    "text": "This is a chunk from the second page of document one..."
+  },
+  // Chunks from doc2.pdf
+  {
+    "doc_id": "doc2.pdf",
+    "page": 1,
+    "chunk_id": 0,
+    "text": "This is the first chunk from document two..."
+  },
+  {
+    "doc_id": "doc2.pdf",
+    "page": 1,
+    "chunk_id": 1,
+    "text": "This is the second chunk from document two..."
+  }
+]
+
+This concludes the entire src/ingest.py module. We have successfully turned a folder of PDFs into a structured list of text chunks, ready for the next stage.
+
+The next logical step in the data flow is to take this list of text chunks and convert them into numerical representations (embeddings) so a computer can understand their meaning. This is handled by the src/embed.py module.
+
+**************************************************************** end of ingestion ***********************************************************************
+
+
+src/embed.py
+
+Purpose of this module: This module's job is to take our list of text chunks and use a pre-trained AI model (a "sentence transformer") to turn each chunk's text into a list of numbers, called a vector embedding. It then organizes these vectors into a highly efficient search index using a library called FAISS. This is the "R" (Retrieval) part of RAG, where we prepare our data to be searched.
+
+Let's examine the first function in this module.
+
+Function 1: create_embeddings_and_index()
+
+This is the core function of the module. It orchestrates the entire embedding and indexing process.
+
+def create_embeddings_and_index(chunks, model_name='all-MiniLM-L6-v2'):
+    """
+    Generates embeddings for text chunks and builds a FAISS index.
+    """
+    if not chunks:
+        print("No chunks to process. Aborting embedding creation.")
+        return None, None
+
+    print(f"Loading embedding model: {model_name}")
+    model = SentenceTransformer(model_name)
+    
+    # Extract text from chunks for batch embedding
+    texts = [chunk['text'] for chunk in chunks]
+    
+    print("Generating embeddings for all chunks...")
+    embeddings = model.encode(texts, show_progress_bar=True, convert_to_numpy=True)
+    
+    # Normalize embeddings for cosine similarity search with L2 distance
+    faiss.normalize_L2(embeddings)
+    
+    # Build the FAISS index
+    embedding_dim = embeddings.shape[1]
+    index = faiss.IndexFlatL2(embedding_dim)
+    index.add(embeddings)
+    
+    print(f"FAISS index created successfully with {index.ntotal} vectors.")
+    
+    return index, chunks
+
+What does it do?
+
+It takes the chunks list (the output from our previous module) and the model_name of the sentence transformer we want to use.
+Load Model: It loads the specified pre-trained model using the SentenceTransformer library. The first time this runs, the library will download the model from the internet and cache it for future use.
+Extract Texts: It creates a simple list containing only the text from each chunk dictionary. This is more efficient for the model to process in a batch.
+Generate Embeddings: This is the key step. It calls model.encode() on the list of texts. The model processes all the text chunks and outputs a list of vectors (embeddings). Each vector is a list of numbers (typically 384 for this model) that represents the semantic meaning of the corresponding text chunk.
+Normalize Embeddings: It performs a mathematical operation called L2 normalization on all the vectors. This is a crucial technical step that allows us to use a very fast distance calculation (L2 distance) to find the most similar vectors, which is equivalent to finding the highest cosine similarity.
+Build Index: It creates a FAISS index. Think of this index as a highly optimized database specifically designed for searching through millions of vectors very, very quickly. It adds all our normalized embeddings into this index.
+Finally, it returns the created index and the original chunks list (which we still need for its metadata like doc_id and page).
+
+Sample Input & Output
+
+Sample Input (the chunks list):
+
+[
+  { "doc_id": "doc1.pdf", "page": 1, "chunk_id": 0, "text": "The sky is blue." },
+  { "doc_id": "doc2.pdf", "page": 1, "chunk_id": 0, "text": "The ocean is vast." }
+]
+
+Sample Output (the returned index and chunks):
+
+chunks: The exact same list that was passed in.
+
+index: This is a complex FAISS object, not easily printable. But conceptually, it now contains two vectors:
+
+Vector for "The sky is blue.": [0.01, -0.5, 0.23, ...] (384 numbers)
+
+Vector for "The ocean is vast.": [0.05, -0.4, 0.19, ...] (384 numbers)
+These two vectors would be numerically "close" to each other in the vector space because they are semantically related (both about large, natural things).
+
+*****************************************************************************************************************************
+save_index_and_chunks()
+
+"""Saves the FAISS index and the chunk metadata to disk."""
+    print(f"Saving FAISS index to {index_path}")
+    faiss.write_index(index, index_path)
+    
+    print(f"Saving chunk metadata to {chunks_path}")
+    with open(chunks_path, 'wb') as f:
+        pickle.dump(chunks, f)
+
+Sample Input & Output
+Sample Input:
+index: The FAISS index object we created in the previous step.
+chunks: The full list of chunk dictionaries.
+index_path: "./index/faiss_index.bin"
+chunks_path: "./index/chunks.pkl"
+Sample Output:
+This function doesn't return anything. Its output is the creation of two files on your disk:
+./index/faiss_index.bin: A binary file containing the optimized vector index. Its size will depend on the number of chunks.
+./index/chunks.pkl: A pickle file containing all the metadata for every chunk.
+
+################################################### embedings and vector index has been created ################################################3
+
+
+src/search.py
+
+def __init__(self, model_name, index_path, chunks_path):
+
+It takes the model_name and the paths to our saved index and chunks files.
+Load Model: It loads the exact same SentenceTransformer model we used to create the embeddings. This is crucial; we must use the same model for the query as we did for the documents.
+Load Index: It uses faiss.read_index() to load the pre-built vector index from the .bin file into memory.
+Load Chunks: It opens the .pkl file and uses pickle.load() to reconstruct our complete list of chunk dictionaries.
+It stores the model, the index, and the chunks list as attributes of the Searcher object (using self.), so they can be easily accessed by other methods in the class.
+
+
+*********************************************************************************************************************************************
+def search()
+This method lives inside the Searcher class and performs the actual search operation.
+
+
+It takes a user's query (a string), the number of results to find (k), and our score_threshold for filtering.
+Step 1: Embed the Query: It uses the loaded self.model to convert the user's text query into a vector embedding. This is the exact same process that we used for the document chunks.
+Step 2: Normalize the Query Embedding: It performs the same L2 normalization on the query's vector. This is critical. For the comparison to be mathematically valid, both the vectors in the index and the query vector must be normalized.
+Step 3: Search the Index: This is the magic of FAISS. It calls self.index.search(), passing in the query vector. FAISS instantly compares the query vector to all the vectors in the index and returns two things:
+indices: The IDs of the k most similar document chunks. For example, [5, 87, 23], meaning chunk #5 was the best match, #87 was second best, etc.
+distances: The calculated L2 distance for each of those top k results. A smaller distance means a better match.
+Step 4: Format and Filter Results: It loops through the results returned by FAISS.
+It retrieves the full chunk dictionary from self.chunks using the index (e.g., self.chunks[5]).
+It converts the L2 distance back into a more intuitive Cosine Similarity score (ranging from -1 to 1). The formula 1 - (distance**2) / 2 does this for normalized vectors.
+It checks if this calculated score is above our score_threshold.
+If the score is high enough, it formats the result into a clean dictionary and adds it to our final results list.
+Finally, it returns the list of filtered, formatted, and user-friendly results.
+Sample Input & Output
+Sample Input:
+query: "What is the warranty period?"
+k: 3
+score_threshold: 0.5
+Sample Output (the returned results list):
+(Assuming the index contained a chunk with the text "Warranty: 24 months.")
+[
+  {
+    "doc_id": "Offer_IndustrialSensors.pdf",
+    "page": 1,
+    "score": 0.91,
+    "text": "Offer – Industrial Sensors (Q4 2025) ... Delivery time: 3 weeks after order confirmation. Warranty: 24 months. Payment terms: 30 days net."
+  }
+]
+
+*************************************************************************************************************************************************************
+rag .py
+
+Module: rag.py (The CLI Entrypoint)
+
+Purpose of this module: This script is the "conductor" of our orchestra. It doesn't contain much new logic itself; instead, its main job is to call the functions from the other modules (ingest, embed, search) in the correct order based on user input from the terminal. It's the main program you run to interact with the system.
+
+Let's break down its structure.
+
+Section 1: Configuration and Imports
+
+Section 2 : build_index()
+
+This is a helper function that encapsulates the entire data processing pipeline.
+
+def build_index():
+    """Builds the FAISS index from PDFs in the data directory."""
+    print("Index not found. Starting the build process...")
+    os.makedirs(os.path.dirname(INDEX_PATH), exist_ok=True)
+    
+    # 1. Ingest and Chunk PDFs
+    chunks = process_pdfs_from_directory(DATA_DIR)
+    if not chunks: return False
+        
+    # 2. Create Embeddings and FAISS Index
+    index, chunks_with_meta = create_embeddings_and_index(chunks, MODEL_NAME)
+    if index is None: return False
+
+    # 3. Save the index and chunks
+    save_index_and_chunks(index, chunks_with_meta, INDEX_PATH, CHUNKS_PATH)
+    print("Index built and saved successfully.")
+    return True
+
+What does it do?
+
+This function simply calls the main functions from ingest.py and embed.py in the correct sequence.
+
+It first calls process_pdfs_from_directory() to get all the text chunks.
+
+Then, it passes those chunks to create_embeddings_and_index().
+
+Finally, it saves the results using save_index_and_chunks().
+
+It's designed to be called only when the index files do not already exist.
+
+Function 2: main()
+
+This is the primary function that controls the script's execution flow.
+
+def main():
+    # 1. Setup argument parser
+    parser = argparse.ArgumentParser(...)
+    parser.add_argument("--query", ...)
+    parser.add_argument("--json", ...)
+    parser.add_argument("--threshold", ...)
+    args = parser.parse_args()
+
+    # 2. Check if index exists, if not, build it
+    if not os.path.exists(INDEX_PATH) or not os.path.exists(CHUNKS_PATH):
+        if not build_index():
+            return # Exit if index build fails
+
+    # 3. Initialize the searcher
+    try:
+        searcher = Searcher(MODEL_NAME, INDEX_PATH, CHUNKS_PATH)
+    except Exception as e:
+        print(f"Error initializing searcher: {e}")
+        return
+
+    # 4. Perform the search
+    results = searcher.search(args.query, k=3, score_threshold=args.threshold)
+
+    # 5. Format and print the output
+    if args.json:
+        # Print JSON output
+        ...
+    else:
+        # Print user-friendly text output
+        ...
+
+What does it do?
+
+Parse Arguments: It uses the argparse library to define and read the command-line arguments provided by the user (e.g., --query "What is...?", --json).
+
+Check for Index: This is a crucial efficiency step. It checks if the faiss_index.bin and chunks.pkl files already exist. If they don't, it calls our build_index() helper function to create them. If they do exist, it skips the entire build process, saving a lot of time.
+
+Initialize Searcher: It creates an instance of our Searcher class, which loads the model and the index files from disk.
+
+Perform Search: It calls the searcher.search() method, passing in the user's query and the score threshold that were provided as command-line arguments.
+
+Display Output: It checks if the user included the --json flag.
+
+If yes, it prints the results as a structured JSON object.
+
+If no, it loops through the results and prints them in a nicely formatted, human-readable way.
+
+Sample Input & Output
+
+Sample Input (what you type in the terminal):
+
+python rag.py --query "what is the warranty?" --threshold 0.8
+
+Sample Output (what you see in the terminal):
+
+code
+Code
+download
+content_copy
+expand_less
+Query: "what is the warranty?"
+
+Top 3 Results:
+--------------------
+# 1) doc=Offer_IndustrialSensors.pdf page=1 score=0.91
+   "... Delivery time: 3 weeks after order confirmation. Warranty: 24 months. Payment terms: 30 days net. ..."
+--------------------
+
+###########################################################################################################################################################
+
+app.py for streamlit
+
+
+
+Purpose of this module: While rag.py provides a functional interface for developers, app.py provides a user-friendly, interactive web interface for everyone else. It takes all the powerful backend logic we've built and wraps it in buttons, sliders, and a chat window. It essentially performs the same functions as rag.py but responds to clicks and text inputs in a web browser instead of command-line arguments.
+
+Let's break down its key parts.
+
+Section 1: Setup and Helper Functions
+
+import streamlit as st
+# ... other imports ...
+from rag import build_index, Searcher, ...
+
+# --- Page Configuration ---
+st.set_page_config(...)
+
+# --- State Management ---
+if 'searcher' not in st.session_state:
+    st.session_state.searcher = None
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+
+# --- Helper Functions ---
+@st.cache_resource
+def load_searcher():
+    # ... logic to check for index, build if needed, and load the Searcher ...
+    
+def trigger_rebuild():
+    # ... logic to delete index and rerun the app ...
+
+What does it do?
+
+Imports: It imports the streamlit library (as st) and all the necessary components from our backend.
+
+Page Configuration: st.set_page_config sets the title and icon that appear in the browser tab.
+
+State Management: This is a key concept in Streamlit. st.session_state is a dictionary-like object that persists across user interactions. We use it to store things that shouldn't be reloaded every time a button is clicked, such as the chat history (messages) and the loaded Searcher object.
+
+load_searcher(): This is the most important helper function here.
+
+The @st.cache_resource decorator is a powerful Streamlit feature. It tells Streamlit to run this function only once and then cache its return value (our Searcher object). The cache is only cleared when we explicitly tell it to (e.g., by calling st.cache_resource.clear()).
+
+Inside, it performs the same logic as rag.py: check if the index exists, call build_index() if it doesn't, and finally create and return a Searcher object.
+
+trigger_rebuild(): This helper function is called whenever we upload or delete files. It deletes the old index and clears the cache, forcing load_searcher() to run again from scratch.
+
+Section 2: The Sidebar
+
+with st.sidebar:
+    st.title("📄 Document Management & Settings")
+    
+    # Settings container
+    with st.container(border=True):
+        st.subheader("Search Settings")
+        score_threshold = st.slider(...)
+
+    # Upload container
+    with st.container(border=True):
+        st.subheader("Upload New Documents")
+        uploaded_files = st.file_uploader(...)
+        if st.button("Process Uploaded Files", ...):
+            # ... logic to save files and call trigger_rebuild() ...
+
+    # Management container
+    with st.container(border=True):
+        st.subheader("Manage Existing Documents")
+        # ... logic to list files with delete buttons ...
+        if st.button("Delete", ...):
+            # ... logic to delete a file and call trigger_rebuild() ...
+
+What does it do?
+
+with st.sidebar: tells Streamlit that all the elements created inside this block should appear in the collapsible sidebar on the left of the web page.
+
+st.slider, st.file_uploader, and st.button are Streamlit commands that create interactive UI widgets.
+
+The logic is event-driven. For example, the code inside if st.button(...) only runs when that specific button is clicked by the user.
+
+This section handles all file management. When files are changed (uploaded or deleted), it calls trigger_rebuild() to ensure the search index is updated accordingly. The score_threshold from the slider is stored in a variable to be used later.
+
+Section 3: The Main Chat Interface
+
+st.title("📚 Mini-RAG: Query Your Documents")
+
+# Load the searcher using our cached function
+if st.session_state.searcher is None:
+    st.session_state.searcher = load_searcher()
+
+# If searcher is loaded, show the chat
+if st.session_state.searcher is not None:
+    # Display past messages from history
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            # ... logic to display old messages ...
+
+    # Get new user input
+    if prompt := st.chat_input("Ask a question..."):
+        # Add user message to history and display it
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Get and display assistant response
+        with st.chat_message("assistant"):
+            with st.spinner("Searching..."):
+                results = st.session_state.searcher.search(prompt, score_threshold=score_threshold)
+            
+            # ... logic to display results in a beautified way ...
+            # Add assistant message to history
+            st.session_state.messages.append({"role": "assistant", "content": results})
+
+What does it do?
+
+Load Searcher: It calls our load_searcher() function to get the ready-to-use Searcher object. Thanks to caching, this is instantaneous after the first run.
+
+Display History: It loops through the st.session_state.messages list and displays the entire conversation history using st.chat_message.
+
+Get Input: st.chat_input() creates the text input box at the bottom of the screen. When the user types a message and hits Enter, the message is stored in the prompt variable.
+
+Process Input: The code inside if prompt: runs.
+
+It displays the user's new message.
+
+It calls st.session_state.searcher.search(), passing the user's prompt and the score_threshold from the sidebar slider.
+
+It displays the results from the search in the beautified format (using containers and expanders).
+
+Crucially, it saves both the user's new message and the assistant's response back into the st.session_state.messages list, so the history is preserved.
+
+
+
+############################################################ end ###########################################################
+
+ 

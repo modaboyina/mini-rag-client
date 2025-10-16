@@ -1,0 +1,22 @@
+# Python virtual environment
+venv/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Generated index and metadata
+# The client will generate their own index from their data.
+index/
+
+# User-uploaded data
+# The client should provide their own PDFs.
+# This keeps your repository small and clean.
+data/*.pdf
+
+# Streamlit config (can contain user-specific info)
+.streamlit/
+
+# OS-specific files
+.DS_Store
+Thumbs.db

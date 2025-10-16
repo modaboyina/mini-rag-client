@@ -20,3 +20,6 @@ data/*.pdf
 # OS-specific files
 .DS_Store
 Thumbs.db
+
+# Generated output files from the RAG script
+results.json
